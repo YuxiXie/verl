@@ -416,6 +416,9 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
     if kl_penalty == "kl":
         return logprob - ref_logprob
 
+    if kl_penalty == "reverse_kl":
+        return ref_logprob - logprob
+
     if kl_penalty == "abs":
         return (logprob - ref_logprob).abs()
 
