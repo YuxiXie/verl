@@ -32,7 +32,7 @@ def set_pad_token_id(tokenizer):
         warnings.warn(f'tokenizer.pad_token is None. Now set to {tokenizer.eos_token}')
 
 
-def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kwargs):
+def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, n_search=0, search_token_type='identical', **kwargs):
     """Create a huggingface pretrained tokenizer which correctness handles eos and pad tokens.
 
     Args:
@@ -56,7 +56,18 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
     if correct_pad_token:
         set_pad_token_id(tokenizer)
-    return tokenizer
+    
+    num_new_tokens = 0
+    if n_search > 0:
+        if 'llama' in name_or_path.lower():
+            additional_special_tokens = [f'<|reserved_special_token_{100 + i}|>' for i in range(1 if search_token_type == 'identical' else n_search)]
+        else:
+            additional_special_tokens = [f'<|search_token_{i}|>' for i in range(1 if search_token_type == 'identical' else n_search)]
+        special_tokens_list = [token for token in additional_special_tokens if token not in tokenizer.all_special_ids]
+        if len(special_tokens_list):
+            num_new_tokens = tokenizer.add_special_tokens({"additional_special_tokens": special_tokens_list})
+    
+    return tokenizer, num_new_tokens
 
 
 def hf_processor(name_or_path, **kwargs):

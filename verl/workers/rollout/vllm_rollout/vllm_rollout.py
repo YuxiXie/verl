@@ -166,6 +166,12 @@ class vLLMRollout(BaseRollout):
 
         # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']
+        
+        has_search = 'search_start_indices' in prompts.batch
+        if has_search:
+            search_start_index = prompts.batch['search_start_indices'][0]
+            assert prompts.batch['search_start_indices'].eq(search_start_index).all(), "enforce left-padded"
+            idx, attention_mask, position_ids = idx[:, :search_start_index], attention_mask[:, :search_start_index], position_ids[:, :search_start_index]
 
         batch_size = idx.size(0)
 
@@ -210,6 +216,17 @@ class vLLMRollout(BaseRollout):
             if response.shape[1] < self.config.response_length:
                 response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
                 # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
+            
+            if has_search:
+                search_idx = prompts.batch['input_ids']
+                search_attention_mask = prompts.batch['attention_mask']
+                search_position_ids = prompts.batch['position_ids']
+                if self.sampling_params.n > 1 and do_sample:
+                    search_idx = search_idx.repeat_interleave(self.sampling_params.n, dim=0)
+                    search_attention_mask = search_attention_mask.repeat_interleave(self.sampling_params.n, dim=0)
+                    search_position_ids = search_position_ids.repeat_interleave(self.sampling_params.n, dim=0)
+                    search_start_indices = prompts.batch['search_start_indices'].repeat_interleave(self.sampling_params.n, dim=0)
+                    search_masks = prompts.batch['search_masks'].repeat_interleave(self.sampling_params.n, dim=0)
 
             # utilize current sampling params
             if self.sampling_params.n > 1 and do_sample:
@@ -218,6 +235,8 @@ class vLLMRollout(BaseRollout):
                 position_ids = position_ids.repeat_interleave(self.sampling_params.n, dim=0)
                 batch_size = batch_size * self.sampling_params.n
             seq = torch.cat([idx, response], dim=-1)
+            if has_search:
+                search_seq = torch.cat([search_idx, response], dim=-1)
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
@@ -233,17 +252,30 @@ class vLLMRollout(BaseRollout):
                                                     eos_token=eos_token_id,
                                                     dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        if has_search:
+            search_position_ids = torch.cat([search_position_ids, search_position_ids[:, -1:] + delta_position_id], dim=-1)
+            search_attention_mask = torch.cat((search_attention_mask, response_attention_mask), dim=-1)
+            search_masks = torch.cat((search_masks, torch.zeros_like(response_attention_mask.bool())), dim=-1)
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
+        batch_dict = {
+            'prompts': idx,
+            'responses': response,
+            'input_ids': seq,  # here input_ids become the whole sentences
+            # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+            'attention_mask': attention_mask,
+            'position_ids': position_ids
+        }
+        if has_search:
+            batch_dict.update({
+                'search_input_ids': search_seq,
+                'search_attention_mask': search_attention_mask,
+                'search_position_ids': search_position_ids,
+                'search_start_indices': search_start_indices,
+                'search_masks': search_masks,
+            })
         batch = TensorDict(
-            {
-                'prompts': idx,
-                'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-                'attention_mask': attention_mask,
-                'position_ids': position_ids
-            },
+            batch_dict,
             batch_size=batch_size)
 
         # free vllm cache engine

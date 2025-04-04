@@ -89,7 +89,10 @@ class TaskRunner:
         # instantiate tokenizer
         from verl.utils import hf_tokenizer, hf_processor
         trust_remote_code = config.data.get('trust_remote_code', False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        tokenizer, num_new_tokens = hf_tokenizer(local_path, trust_remote_code=trust_remote_code, **config.actor_rollout_ref.model.override_config)
+        config.actor_rollout_ref.model.num_new_tokens = num_new_tokens
+        config.data.n_search = config.actor_rollout_ref.model.override_config['n_search']
+        config.data.search_token_type = config.actor_rollout_ref.model.override_config['search_token_type']
         processor = hf_processor(local_path, use_fast=True)  # used for multimodal LLM, could be none
 
         # define worker classes

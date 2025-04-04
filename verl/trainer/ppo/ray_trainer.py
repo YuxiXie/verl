@@ -405,6 +405,8 @@ class RayPPOTrainer(object):
                                          processor=self.processor,
                                          prompt_key=self.config.data.prompt_key,
                                          image_key=self.config.data.get('image_key', 'images'),
+                                         n_search=self.config.data.get('n_search', 0),
+                                         search_token_type=self.config.data.get('search_token_type', 'identical'),
                                          max_prompt_length=self.config.data.max_prompt_length,
                                          return_raw_chat=self.config.data.get('return_raw_chat', False),
                                          truncation=self.config.data.get('truncation', 'error'),
@@ -826,6 +828,11 @@ class RayPPOTrainer(object):
                     gen_batch = batch.pop(
                         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
                         non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
+                    )
+                elif 'search_start_indices' in batch.batch.keys():
+                    gen_batch = batch.pop(
+                        batch_keys=['input_ids', 'attention_mask', 'position_ids', 'search_masks', 'search_start_indices'],
+                        non_tensor_batch_keys=['raw_prompt_ids'],
                     )
                 else:
                     gen_batch = batch.pop(

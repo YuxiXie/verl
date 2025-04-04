@@ -150,6 +150,7 @@ class ActorRolloutRefWorker(Worker):
                                role='actor'):
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.torch_dtypes import PrecisionType
+        from verl.models.search import AutoModelForSearch
         from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
         from torch import optim
@@ -161,7 +162,7 @@ class ActorRolloutRefWorker(Worker):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code, **override_model_config)
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get('model_dtype', None)
@@ -191,16 +192,23 @@ class ActorRolloutRefWorker(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            search_kwargs = {}
             if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
                 actor_module_class = AutoModelForVision2Seq
+            elif override_model_config['n_search'] > 0:
+                actor_module_class = AutoModelForSearch
+                search_kwargs.update(override_model_config)
             else:
                 actor_module_class = AutoModelForCausalLM
 
             actor_module = actor_module_class.from_pretrained(pretrained_model_name_or_path=local_path,
                                                               torch_dtype=torch_dtype,
                                                               config=actor_model_config,
-                                                              attn_implementation='flash_attention_2',
+                                                              attn_implementation='sdpa',   # 'flash_attention_2',
                                                               trust_remote_code=trust_remote_code)
+
+            if override_model_config['n_search'] > 0:
+                actor_module.init_search(**search_kwargs)
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -405,7 +413,8 @@ class ActorRolloutRefWorker(Worker):
                 self.config.actor.use_remove_padding = use_remove_padding
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
-                                              actor_optimizer=self.actor_optimizer)
+                                              actor_optimizer=self.actor_optimizer,
+                                              has_search=override_model_config['n_search'] > 0)
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(

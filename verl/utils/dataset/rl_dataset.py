@@ -83,6 +83,8 @@ class RLHFDataset(Dataset):
                  processor: Optional[ProcessorMixin] = None,
                  prompt_key: str = 'prompt',
                  image_key: str = 'images',
+                 n_search=0,
+                 search_token_type='identical',
                  max_prompt_length: int = 1024,
                  cache_dir: str = '~/.cache/verl/rlhf',
                  chat_template_func: Optional[Callable] = None,
@@ -98,6 +100,9 @@ class RLHFDataset(Dataset):
         self.cache_dir = os.path.expanduser(cache_dir)
         self.tokenizer = tokenizer
         self.processor = processor
+        
+        self.n_search = n_search
+        self.search_token_ids = self.tokenizer.all_special_ids[-1:] if search_token_type == 'identical' else self.tokenizer.all_special_ids[-n_search:]
 
         self.prompt_key = prompt_key
         self.image_key = image_key
@@ -169,6 +174,7 @@ class RLHFDataset(Dataset):
         prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
         is_multi_modal = self.image_key in row_dict
+        has_search = self.n_search > 0
         if is_multi_modal:  # expand image token
             raw_prompt = prompt_with_chat_template.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
             row_dict['multi_modal_data'] = {'image': [process_image(image) for image in row_dict.pop(self.image_key)]}
@@ -190,6 +196,15 @@ class RLHFDataset(Dataset):
 
                 prompt_with_chat_template = prompt_with_chat_template.replace('<|placeholder|>',
                                                                               self.processor.image_token)
+        elif has_search:
+            if len(self.search_token_ids) == self.n_search:
+                search_context = self.tokenizer.decode(self.search_token_ids)
+            elif len(self.search_token_ids) == 1:
+                search_context = self.tokenizer.decode(self.search_token_ids) * self.n_search
+            else:
+                raise NotImplementedError
+            raw_prompt = prompt_with_chat_template
+            prompt_with_chat_template = raw_prompt + search_context + '\n'
         else:
             raw_prompt = prompt_with_chat_template
 
@@ -212,9 +227,22 @@ class RLHFDataset(Dataset):
         else:
             position_ids = compute_position_id_with_mask(attention_mask)
 
+        if has_search:
+            search_masks, search_start_indices = [], []
+            for ids in input_ids:
+                # locate search state tokens
+                search_state_positions = ids.eq(self.search_token_ids[0])
+                for search_token_id in self.search_token_ids[1:]:
+                    search_state_positions = torch.logical_or(search_state_positions, ids.eq(search_token_id))
+                search_masks.append(search_state_positions)
+                search_start_indices.append(search_state_positions.nonzero().squeeze(-1)[0])
+            search_masks = torch.stack(search_masks, dim=0)
+        
         row_dict['input_ids'] = input_ids[0]
         row_dict['attention_mask'] = attention_mask[0]
         row_dict['position_ids'] = position_ids[0]
+        row_dict['search_masks'] = search_masks[0] if has_search else None
+        row_dict['search_start_indices'] = search_start_indices[0] if has_search else None
         row_dict['raw_prompt_ids'] = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
 
         # encode prompts without chat template

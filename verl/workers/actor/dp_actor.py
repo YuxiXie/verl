@@ -43,6 +43,7 @@ class DataParallelPPOActor(BasePPOActor):
         config,
         actor_module: nn.Module,
         actor_optimizer: torch.optim.Optimizer = None,
+        has_search: bool = False,
     ):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
@@ -58,6 +59,8 @@ class DataParallelPPOActor(BasePPOActor):
             if self.config.get('use_torch_compile', True)  #  use torch compile by default
             else verl_F.entropy_from_logits)
 
+        self.has_search = has_search
+
     def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns: 
@@ -65,6 +68,7 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs: # (bs, response_len)
         """
         response_length = micro_batch['responses'].size(-1)
+        has_search = self.has_search and 'search_masks' in micro_batch
         multi_modal_inputs = {}
         if 'multi_modal_inputs' in micro_batch:
             for key in micro_batch['multi_modal_inputs'][0].keys():
@@ -72,13 +76,45 @@ class DataParallelPPOActor(BasePPOActor):
                                                     dim=0)
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            input_ids = micro_batch['input_ids']
-            batch_size, seqlen = input_ids.shape
-            attention_mask = micro_batch['attention_mask']
-            position_ids = micro_batch['position_ids']
+            if has_search:
+                input_ids = micro_batch['search_input_ids']
+                batch_size, seqlen = input_ids.shape
+                attention_mask = micro_batch['search_attention_mask']
+                position_ids = micro_batch['search_position_ids']
+            else:
+                input_ids = micro_batch['input_ids']
+                batch_size, seqlen = input_ids.shape
+                attention_mask = micro_batch['attention_mask']
+                position_ids = micro_batch['position_ids']
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
+            if has_search:
+                dtype, device = torch.bfloat16, self.actor_module.device
+                min_dtype = torch.finfo(dtype).min
+                causal_mask = torch.full(
+                    (seqlen, seqlen), fill_value=min_dtype, dtype=dtype, device=device
+                )
+                diagonal_attend_mask = torch.arange(seqlen, device=device) > torch.arange(seqlen, device=device).reshape(-1, 1)
+                causal_mask *= diagonal_attend_mask
+                causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+                
+                # apply search mask
+                search_masks = micro_batch['search_masks'].unsqueeze(1).unsqueeze(-1)   # (bsz, 1, seqlen, 1)
+                attend_to_all = torch.zeros_like(causal_mask)
+                causal_mask = torch.where(search_masks, attend_to_all, causal_mask)
+                
+                # apply attention mask
+                mask_length = attention_mask.shape[-1]
+                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(
+                    causal_mask.device
+                )
+                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
+                    padding_mask.eq(0), min_dtype
+                )
+                attention_mask = causal_mask
+            
             if self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1),
                                                            attention_mask)  # input_ids_rmpad (total_nnz, ...)
@@ -194,12 +230,18 @@ class DataParallelPPOActor(BasePPOActor):
         """
         # set to eval
         self.actor_module.eval()
+        
+        has_search = self.has_search and 'search_masks' in data.batch.keys()
 
         micro_batch_size = data.meta_info['micro_batch_size']
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
+        if has_search:
+            select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 
+                           'search_input_ids', 'search_attention_mask', 'search_position_ids',
+                           'search_masks', 'search_start_indices']
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = 'multi_modal_inputs' in data.non_tensor_batch.keys()
 
@@ -238,7 +280,11 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
+        if self.has_search:
+            select_keys = ['responses', 'search_input_ids', 'search_attention_mask', 'search_position_ids', 
+                           'old_log_probs', 'advantages', 'search_masks']
+        else:
+            select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages']
         if self.config.use_kl_loss:
             select_keys.append('ref_log_prob')
         batch = data.select(batch_keys=select_keys).batch
@@ -280,7 +326,7 @@ class DataParallelPPOActor(BasePPOActor):
                         data = data.to(torch.cuda.current_device())  # actor device is cpu when using offload
                     responses = data['responses']
                     response_length = responses.size(1)
-                    attention_mask = data['attention_mask']
+                    attention_mask = data['attention_mask'] if self.has_search else data['attention_mask']
                     response_mask = attention_mask[:, -response_length:]
                     old_log_prob = data['old_log_probs']
                     advantages = data['advantages']

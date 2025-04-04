@@ -15,13 +15,16 @@ data:
   filter_overlong_prompts_workers: 1
   truncation: error
   image_key: images
+  n_search: 0
+  search_token_type: identical
 
 actor_rollout_ref:
   hybrid_engine: True
   model:
     path: ~/models/deepseek-llm-7b-chat
     external_lib: null
-    override_config: { }
+    override_config: { n_search: 0, search_token_type: identical }
+    num_new_tokens: 0
     enable_gradient_checkpointing: True
     use_remove_padding: False
   actor:
