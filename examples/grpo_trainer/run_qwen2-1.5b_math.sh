@@ -1,6 +1,6 @@
 set -x
 
-export WANDB_API_KEY="1396a7d2a29a8e8241dff6e0e6371f2ad61e11e2"
+export WANDB_API_KEY=""
 
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
