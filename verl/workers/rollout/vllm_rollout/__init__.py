@@ -43,7 +43,8 @@ else:
 
 if package_version <= '0.6.3':
     vllm_mode = 'customized'
-    from .vllm_rollout import vLLMRollout
+    from .vllm_rollout import vLLMRollout, _pre_process_inputs
+    from .vllm_rollout_mcts import vLLMRolloutMCTS
     from .fire_vllm_rollout import FIREvLLMRollout
 else:
     vllm_mode = 'spmd'

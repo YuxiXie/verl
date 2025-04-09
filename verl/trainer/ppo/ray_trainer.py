@@ -832,12 +832,12 @@ class RayPPOTrainer(object):
                 elif 'search_start_indices' in batch.batch.keys():
                     gen_batch = batch.pop(
                         batch_keys=['input_ids', 'attention_mask', 'position_ids', 'search_masks', 'search_start_indices'],
-                        non_tensor_batch_keys=['raw_prompt_ids'],
+                        non_tensor_batch_keys=['raw_prompt_ids', 'demo', 'answer'],
                     )
                 else:
                     gen_batch = batch.pop(
                         batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                        non_tensor_batch_keys=['raw_prompt_ids'],
+                        non_tensor_batch_keys=['raw_prompt_ids', 'demo', 'answer'],
                     )
 
                 is_last_step = self.global_steps >= self.total_training_steps

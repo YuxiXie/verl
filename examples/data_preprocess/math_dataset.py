@@ -65,6 +65,7 @@ if __name__ == '__main__':
                 "ability": "math",
                 "reward_model": {
                     "style": "rule",
+                    "demo": answer,
                     "ground_truth": solution
                 },
                 "extra_info": {
